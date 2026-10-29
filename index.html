@@ -35,6 +35,13 @@ button.ghost{background:transparent;color:var(--mute);font-weight:500;padding:8p
 .fit{flex:none;width:auto}
 .small{color:var(--mute);font-size:13px;margin:12px 0 0}
 .lookup{margin-top:14px}
+.searchWrap{position:relative}
+input[type=search]{-webkit-appearance:none;appearance:none}
+.results{position:absolute;left:0;right:0;bottom:100%;margin-bottom:6px;max-height:min(45vh,320px);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.28);display:none;z-index:4}
+.results button{display:flex;justify-content:space-between;gap:12px;width:100%;background:transparent;color:var(--ink);font-weight:500;border-radius:0;border-bottom:1px solid var(--line);text-align:left;padding:12px 14px}
+.results button:last-child{border-bottom:0}
+.results .pr{font-variant-numeric:tabular-nums;color:var(--mute);white-space:nowrap}
+.results .none{padding:12px 14px;color:var(--mute);font-size:15px}
 .sheet{position:fixed;inset:0;background:var(--bg);padding:calc(20px + env(safe-area-inset-top,0px)) 20px 24px;overflow:auto;display:none;z-index:5}
 .sheet label{display:block;font-size:14px;color:var(--mute);margin:16px 0 6px}
 .sheet h2{margin:0;font-size:22px}
@@ -49,11 +56,15 @@ button.ghost{background:transparent;color:var(--mute);font-weight:500;padding:8p
   <div class="frame"></div>
   <div class="msg" id="err"></div>
   <div class="top"><button id="sync">Sync</button><button id="gear" aria-label="Settings">Settings</button></div>
-  <div class="bar"><button id="camBtn">Turn camera off</button><button id="focusBtn">Refocus</button></div>
+  <div class="bar"><button id="camBtn">Turn camera off</button><button id="focusBtn">Refocus</button><button id="torchBtn" style="display:none">Light on</button></div>
 </div>
 <div class="panel">
   <div id="out"><p class="hint">Point the camera at a barcode.</p></div>
-  <div class="row lookup">
+  <div class="searchWrap lookup">
+    <div class="results" id="results"></div>
+    <input id="search" type="search" placeholder="Search by product name" aria-label="Search by product name" autocomplete="off">
+  </div>
+  <div class="row">
     <input id="code" inputmode="numeric" placeholder="Or type a barcode number" aria-label="Barcode number">
     <button id="go" class="fit">Look up</button>
   </div>
@@ -97,6 +108,7 @@ function parsePrice(s){
 }
 
 function showFound(code, p){
+  closeResults();
   editing = false;
   out.innerHTML = '<p class="name"></p><p class="price"></p><button class="ghost" id="ed">Edit</button>';
   out.querySelector(".name").textContent = p.name;
@@ -104,6 +116,7 @@ function showFound(code, p){
   document.getElementById("ed").onclick = function(){ showForm(code, p); };
 }
 function showForm(code, p){
+  closeResults();
   editing = true;
   out.innerHTML = '<p class="hint" id="bc"></p>'
     + '<div class="row"><input id="n" placeholder="Product name" aria-label="Product name"></div>'
@@ -138,6 +151,69 @@ document.getElementById("go").onclick = function(){
   editing = false; last = ""; onCode(c);
 };
 document.getElementById("code").addEventListener("keydown", function(e){ if (e.key === "Enter") document.getElementById("go").click(); });
+
+// ---- search by name (any word order, partial words, small typos) ----
+function norm(t){ return String(t).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim(); }
+function lev(a, b){
+  var prev = [], cur = [], i, j;
+  for (j = 0; j <= b.length; j++) prev[j] = j;
+  for (i = 1; i <= a.length; i++){
+    cur = [i];
+    for (j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+function searchProducts(query){
+  var q = norm(query);
+  if (!q) return [];
+  var words = q.split(" "), res = [];
+  Object.keys(products).forEach(function(code){
+    var n = norm(products[code].name), toks = n.split(" "), total = 0, ok = true;
+    for (var k = 0; k < words.length && ok; k++){
+      var w = words[k], best = -1, i, t;
+      if (/^\d+$/.test(w) && code.indexOf(w) >= 0) best = 0;
+      for (i = 0; i < toks.length && best !== 0; i++) if (toks[i].indexOf(w) === 0) best = 0;
+      if (best < 0 && w.length > 1 && (n.indexOf(w) >= 0 || n.replace(/ /g, "").indexOf(w) >= 0)) best = 1;
+      if (best < 0){
+        var maxd = w.length >= 6 ? 2 : (w.length >= 3 ? 1 : 0);
+        if (maxd) for (i = 0; i < toks.length; i++){
+          t = toks[i];
+          var d = Math.min(lev(w, t), lev(w, t.slice(0, w.length)));
+          if (d <= maxd && (best < 0 || 2 + d < best)) best = 2 + d;
+        }
+      }
+      if (best < 0) ok = false; else total += best;
+    }
+    if (ok) res.push({code:code, p:products[code], sc:total});
+  });
+  res.sort(function(a, b){ return a.sc - b.sc || a.p.name.localeCompare(b.p.name); });
+  return res.slice(0, 30);
+}
+var sEl = document.getElementById("search"), resEl = document.getElementById("results");
+function closeResults(){ resEl.style.display = "none"; resEl.innerHTML = ""; sEl.value = ""; }
+function runSearch(){
+  if (!norm(sEl.value)){ resEl.style.display = "none"; resEl.innerHTML = ""; return; }
+  var list = searchProducts(sEl.value);
+  resEl.innerHTML = "";
+  if (!list.length){
+    var d = document.createElement("div"); d.className = "none";
+    d.textContent = Object.keys(products).length ? "No matching product." : "No products saved yet.";
+    resEl.appendChild(d);
+  }
+  list.forEach(function(r){
+    var b = document.createElement("button"), a = document.createElement("span"), c = document.createElement("span");
+    a.textContent = r.p.name; c.className = "pr"; c.textContent = money(r.p.price);
+    b.appendChild(a); b.appendChild(c);
+    b.onclick = function(){ showFound(r.code, r.p); };
+    resEl.appendChild(b);
+  });
+  resEl.style.display = "block";
+}
+sEl.addEventListener("input", runSearch);
+sEl.addEventListener("focus", runSearch);
+sEl.addEventListener("keydown", function(e){ if (e.key === "Enter"){ var f = resEl.querySelector("button"); if (f) f.click(); } });
+document.addEventListener("click", function(e){ if (!e.target.closest(".searchWrap")){ resEl.style.display = "none"; } });
 
 // ---- GitHub sync: pulls the latest file, merges your changes, saves one commit ----
 function enc(s){ var b = new TextEncoder().encode(s), r = ""; b.forEach(function(x){ r += String.fromCharCode(x); }); return btoa(r); }
@@ -203,7 +279,7 @@ window.addEventListener("beforeunload", function(e){ if (dirty.length){ e.preven
 
 // ---- camera (can be turned off to save battery) ----
 var camEl = document.getElementById("cam"), vid = document.getElementById("v"), msgEl = document.getElementById("err");
-var camBtn = document.getElementById("camBtn"), camOn = false, stream = null, scanId = 0, reader = null, resumeCam = false;
+var camBtn = document.getElementById("camBtn"), torchBtn = document.getElementById("torchBtn"), torchOn = false, camOn = false, stream = null, scanId = 0, reader = null, resumeCam = false;
 function showMsg(t){ msgEl.textContent = t; msgEl.style.display = "flex"; }
 function flash(t){ setNote(t); setTimeout(refreshStatus, 1800); }
 function stopCam(){
@@ -214,33 +290,53 @@ function stopCam(){
   camEl.classList.add("off");
   showMsg("Camera is off to save battery. Tap “Turn camera on” to scan.");
   camBtn.textContent = "Turn camera on";
+  torchBtn.style.display = "none"; torchOn = false; torchBtn.textContent = "Light on";
+}
+function validCode(c){
+  if (!/^\d+$/.test(c) || (c.length !== 13 && c.length !== 12 && c.length !== 8)) return true;
+  var d = c.split("").map(Number), chk = d.pop(), sum = 0, w = 3;
+  for (var i = d.length - 1; i >= 0; i--, w = (w === 3 ? 1 : 3)) sum += d[i] * w;
+  return (10 - sum % 10) % 10 === chk;
+}
+var cand = "", candN = 0, candAt = 0;
+function accept(raw, skipCheck){
+  if (!raw) return;
+  if (!skipCheck && !validCode(raw)) return;      // wrong check digit = misread, ignore
+  var now = Date.now();
+  if (raw === cand && now - candAt < 1500) candN++; else { cand = raw; candN = 1; }
+  candAt = now;
+  if (candN >= 3){ candN = 0; onCode(raw); }      // only accept after 3 identical reads in a row
 }
 async function startCam(){
   if (camOn) return;
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ showMsg("Camera isn’t available here. Type the barcode number below instead."); return; }
   try{
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}, audio:false});
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}, audio:false});
     vid.srcObject = stream; await vid.play();
   }catch(e){ stream = null; showMsg("Camera access was blocked. Allow the camera for this site, or type the barcode number below."); return; }
   camOn = true; msgEl.style.display = "none"; camEl.classList.remove("off"); camBtn.textContent = "Turn camera off";
   try{
     var t = stream.getVideoTracks()[0], caps = t.getCapabilities ? t.getCapabilities() : {};
     if (caps.focusMode && caps.focusMode.indexOf("continuous") >= 0) t.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(function(){});
+    torchBtn.style.display = caps.torch ? "" : "none";
   }catch(e){}
   var id = ++scanId;
   if ("BarcodeDetector" in window){
     try{
-      var det = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e","code_128"]});
+      var det = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","code_128"]});
       (function loop(){
         if (id !== scanId) return;
-        det.detect(vid).then(function(r){ if (id === scanId && r.length) onCode(r[0].rawValue); }).catch(function(){}).then(function(){ setTimeout(loop, 200); });
+        det.detect(vid).then(function(r){ if (id === scanId && r.length) accept(r[0].rawValue, r[0].format === "code_128"); }).catch(function(){}).then(function(){ setTimeout(loop, 200); });
       })();
       return;
     }catch(e){}
   }
   if (window.ZXing){
-    reader = new ZXing.BrowserMultiFormatReader();
-    reader.decodeFromVideoElement(vid, function(res){ if (id === scanId && res) onCode(res.getText()); });
+    var hints = new Map(), F = ZXing.BarcodeFormat;
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [F.EAN_13, F.EAN_8, F.UPC_A, F.CODE_128]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    reader = new ZXing.BrowserMultiFormatReader(hints, 150);
+    reader.decodeFromVideoElement(vid, function(res){ if (id === scanId && res) accept(res.getText(), res.getBarcodeFormat() === F.CODE_128); });
   } else { showMsg("Scanner failed to load. Type the barcode number below instead."); }
 }
 async function refocus(){
@@ -257,6 +353,11 @@ async function refocus(){
   flash("Refocusing…");
   stopCam(); await startCam();   // this phone doesn’t allow focus control, so restart the camera instead
 }
+torchBtn.onclick = function(){
+  if (!stream) return;
+  torchOn = !torchOn;
+  stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:torchOn}]}).then(function(){ torchBtn.textContent = torchOn ? "Light off" : "Light on"; }).catch(function(){ torchOn = false; flash("Light isn’t available on this phone."); });
+};
 camBtn.onclick = function(){ camOn ? stopCam() : startCam(); };
 document.getElementById("focusBtn").onclick = refocus;
 camEl.addEventListener("click", function(e){ if (!e.target.closest("button")) refocus(); });
