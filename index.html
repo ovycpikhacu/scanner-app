@@ -159,7 +159,8 @@ async function sync(){
         if (w.status === 404) throw new Error("Repo not found. Check the username, repo name and token access.");
         if (!w.ok) throw new Error("Couldn’t save to GitHub (error " + w.status + ").");
       } else if (r.status === 404){
-        throw new Error("Repo not found. Check the username, repo name and token access.");
+        var rr = await fetch("https://api.github.com/repos/" + encodeURIComponent(cfg.user) + "/" + encodeURIComponent(cfg.repo), {headers:H, cache:"no-store"});
+        if (!rr.ok) throw new Error("Repo not found. Check the username, repo name and token access.");
       }
       products = merged; dirty = []; save("products", products); save("dirty", dirty);
       busy = false; refreshStatus(); return;
