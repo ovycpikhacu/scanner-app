@@ -19,7 +19,11 @@ video{width:100%;height:100%;object-fit:cover;display:block}
 .frame::after{content:"";position:absolute;left:6px;right:6px;top:50%;height:2px;background:var(--red);box-shadow:0 0 8px var(--red)}
 .msg{position:absolute;inset:0;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;color:#fff;font-size:15px;line-height:1.5}
 .top{position:absolute;top:10px;left:10px;right:10px;display:flex;justify-content:space-between;gap:8px}
-.top button{background:rgba(0,0,0,.6);color:#fff;font-size:15px;padding:9px 14px;border-radius:999px}
+.bar{position:absolute;bottom:10px;left:10px;right:10px;display:flex;justify-content:center;gap:8px}
+.top button,.bar button{background:rgba(0,0,0,.6);color:#fff;font-size:15px;padding:9px 14px;border-radius:999px}
+.msg{pointer-events:none}
+.cam.off video{visibility:hidden}
+.cam.off .frame{display:none}
 .panel{flex:0 0 auto;padding:18px 20px 22px;background:var(--card);border-top:1px solid var(--line)}
 .hint{color:var(--mute);font-size:15px;margin:0}
 .name{font-size:22px;font-weight:600;line-height:1.25;margin:0 0 4px;overflow-wrap:anywhere}
@@ -40,11 +44,12 @@ button.ghost{background:transparent;color:var(--mute);font-weight:500;padding:8p
 </style>
 </head>
 <body>
-<div class="cam">
+<div class="cam" id="cam">
   <video id="v" playsinline muted></video>
   <div class="frame"></div>
   <div class="msg" id="err"></div>
   <div class="top"><button id="sync">Sync</button><button id="gear" aria-label="Settings">Settings</button></div>
+  <div class="bar"><button id="camBtn">Turn camera off</button><button id="focusBtn">Refocus</button></div>
 </div>
 <div class="panel">
   <div id="out"><p class="hint">Point the camera at a barcode.</p></div>
@@ -196,32 +201,72 @@ document.getElementById("s_save").onclick = function(){
 };
 window.addEventListener("beforeunload", function(e){ if (dirty.length){ e.preventDefault(); e.returnValue = ""; } });
 
-// ---- camera ----
-function fail(t){ var e = document.getElementById("err"); e.textContent = t; e.style.display = "flex"; }
-async function start(){
-  var v = document.getElementById("v");
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ fail("Camera isn’t available here. Type the barcode number below instead."); return; }
+// ---- camera (can be turned off to save battery) ----
+var camEl = document.getElementById("cam"), vid = document.getElementById("v"), msgEl = document.getElementById("err");
+var camBtn = document.getElementById("camBtn"), camOn = false, stream = null, scanId = 0, reader = null, resumeCam = false;
+function showMsg(t){ msgEl.textContent = t; msgEl.style.display = "flex"; }
+function flash(t){ setNote(t); setTimeout(refreshStatus, 1800); }
+function stopCam(){
+  camOn = false; scanId++;
+  if (reader){ try{ reader.reset(); }catch(e){} reader = null; }
+  if (stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream = null; }
+  vid.srcObject = null;
+  camEl.classList.add("off");
+  showMsg("Camera is off to save battery. Tap “Turn camera on” to scan.");
+  camBtn.textContent = "Turn camera on";
+}
+async function startCam(){
+  if (camOn) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ showMsg("Camera isn’t available here. Type the barcode number below instead."); return; }
   try{
-    var stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}, audio:false});
-    v.srcObject = stream; await v.play();
-  }catch(e){ fail("Camera access was blocked. Allow the camera for this site, or type the barcode number below."); return; }
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}, audio:false});
+    vid.srcObject = stream; await vid.play();
+  }catch(e){ stream = null; showMsg("Camera access was blocked. Allow the camera for this site, or type the barcode number below."); return; }
+  camOn = true; msgEl.style.display = "none"; camEl.classList.remove("off"); camBtn.textContent = "Turn camera off";
+  try{
+    var t = stream.getVideoTracks()[0], caps = t.getCapabilities ? t.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.indexOf("continuous") >= 0) t.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(function(){});
+  }catch(e){}
+  var id = ++scanId;
   if ("BarcodeDetector" in window){
     try{
       var det = new BarcodeDetector({formats:["ean_13","ean_8","upc_a","upc_e","code_128"]});
       (function loop(){
-        det.detect(v).then(function(r){ if (r.length) onCode(r[0].rawValue); }).catch(function(){}).then(function(){ setTimeout(loop, 200); });
+        if (id !== scanId) return;
+        det.detect(vid).then(function(r){ if (id === scanId && r.length) onCode(r[0].rawValue); }).catch(function(){}).then(function(){ setTimeout(loop, 200); });
       })();
       return;
     }catch(e){}
   }
   if (window.ZXing){
-    var reader = new ZXing.BrowserMultiFormatReader();
-    reader.decodeFromVideoElement(v, function(res){ if (res) onCode(res.getText()); });
-  } else { fail("Scanner failed to load. Type the barcode number below instead."); }
+    reader = new ZXing.BrowserMultiFormatReader();
+    reader.decodeFromVideoElement(vid, function(res){ if (id === scanId && res) onCode(res.getText()); });
+  } else { showMsg("Scanner failed to load. Type the barcode number below instead."); }
 }
+async function refocus(){
+  if (!camOn || !stream) return;
+  var t = stream.getVideoTracks()[0], modes = [];
+  try{ modes = (t.getCapabilities && t.getCapabilities().focusMode) || []; }catch(e){}
+  if (modes.indexOf("single-shot") >= 0){
+    try{
+      await t.applyConstraints({advanced:[{focusMode:"single-shot"}]});
+      if (modes.indexOf("continuous") >= 0) setTimeout(function(){ t.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(function(){}); }, 1500);
+      flash("Refocusing…"); return;
+    }catch(e){}
+  }
+  flash("Refocusing…");
+  stopCam(); await startCam();   // this phone doesn’t allow focus control, so restart the camera instead
+}
+camBtn.onclick = function(){ camOn ? stopCam() : startCam(); };
+document.getElementById("focusBtn").onclick = refocus;
+camEl.addEventListener("click", function(e){ if (!e.target.closest("button")) refocus(); });
+document.addEventListener("visibilitychange", function(){
+  if (document.hidden && camOn){ resumeCam = true; stopCam(); }
+  else if (!document.hidden && resumeCam){ resumeCam = false; startCam(); }
+});
 refreshStatus();
 if (cfg.user && cfg.repo && cfg.token && !dirty.length) sync();
-start();
+startCam();
 </script>
 </body>
 </html>
